@@ -1,111 +1,101 @@
-#include <ESP8266WiFi.h>
 #include <ArduinoJson.h>
+#include <ESP8266WiFi.h>
 
+// digital PIN - GPIO map
 #define D0 16
 #define D1 5 // I2C Bus SCL (clock)
 #define D2 4 // I2C Bus SDA (data)
 #define D3 0
-#define D4 2 // Same as "LED_BUILTIN", but inverted logic
+#define D4 2  // Same as "LED_BUILTIN", but inverted logic
 #define D5 14 // SPI Bus SCK (clock)
-#define D6 12 // SPI Bus MISO 
+#define D6 12 // SPI Bus MISO
 #define D7 13 // SPI Bus MOSI
 #define D8 15 // SPI Bus SS (CS)
-#define D9 3 // RX0 (Serial console)
+#define D9 3  // RX0 (Serial console)
 #define D10 1 // TX0 (Serial console)
 
+// mode configurations
 #define STATE_ON 0
 #define STATE_OFF 1
+#define DEBUG_MODE false
 
-#define STATE_OFF 1
+// WIFI configurations
+const char *WIFI_SSID = "";
+const char *WIFI_PASSWORD = "";
 
-const char* ssid     = "giay123";
-const char* password = "123giay123";
-const char* host = "167.99.66.144";
+// service configurations
+const char *SERVICE_HOST = "167.99.66.144";
+const int SERVICE_PORT = 80;
+const String SERVICE_ROUTE = "/state";
+const int POOLING_INTERVAL = 10000;
+const String API_KEY = "";
+const String DEVICE_ID = "";
+
+// available pins
+const int PIN_SZIE = 3;
+int pins[PIN_SZIE] = { D0, D1, D2 };
 
 void setup() {
-  pinMode(D0, OUTPUT);
-  pinMode(D1, OUTPUT);
-  pinMode(D2, OUTPUT);
-  digitalWrite(D0, STATE_OFF);
-  digitalWrite(D1, STATE_OFF);
-  digitalWrite(D2, STATE_OFF);
-  
+  // pins  
+  for (int i = 0; i < PIN_SZIE; i++) {
+    pinMode(pins[i], OUTPUT);
+    digitalWrite(pins[i], STATE_OFF);
+  }  
+  pinMode(D4, OUTPUT);
+  digitalWrite(D4, 1);
+  log("WiFi connected - IP address: " + WiFi.localIP());
+  // serial
   Serial.begin(115200);
   delay(10);
-
-  // We start by connecting to a WiFi network
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-
-  WiFi.begin(ssid, password); //works!
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("");
-  Serial.println("WiFi connected");  
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
 }
 
 void loop() {
-  delay(10000);
-  Serial.print("connecting to ");
-  Serial.println(host);
+  delay(POOLING_INTERVAL);
+  if (checkOrEstablishWiFiConnection(WIFI_SSID, WIFI_PASSWORD)) {
+    String res = sendRequest(SERVICE_HOST, SERVICE_PORT, SERVICE_ROUTE + "/" + API_KEY + "/" + DEVICE_ID);
+    log("received response data: " + res);
+    parseResponseData(res); 
+  }  
+}
 
-  // Use WiFiClient class to create TCP connections
-  WiFiClient client;
-  const int httpPort = 80;
-  if (!client.connect(host, httpPort)) {
-    Serial.println("connection failed");
-    return;
-  }
-
-  // We now create a URI for the request
-  String url = "/state/HELLO/1";
-
-  Serial.print("Requesting URL: ");
-  Serial.println(url);
-
-  // This will send the request to the server
-  client.print(String("GET ") + url + " HTTP/1.1\r\n" +
-               "Host: " + host + "\r\n" + 
-               "Connection: close\r\n\r\n");
-               delay(10);
-
- unsigned long timeout = millis();
-  while (client.available() == 0) {
-    if (millis() - timeout > 5000) {
-      Serial.println(">>> Client Timeout !");
-      client.stop();
-      return;
+bool checkOrEstablishWiFiConnection(const char *ssid, const char *password) {
+  bool retval = true;
+  if (WiFi.status() != WL_CONNECTED) {
+    inProcess();
+    log("connecting to the WiFi network: ", true);
+    log(ssid);    
+    WiFi.begin(ssid, password);
+    for (int i = 0; i < 20; i++) {
+      if ( WiFi.status() != WL_CONNECTED ) {        
+        delay(500);
+        inProcess();
+        retval = false;
+      } else {
+        retval = true;
+        break;
+      }
     }
   }
+  return retval;
+}
 
-  // Read all the lines of the reply from server and print them to Serial
-  // Example Response Data: {"data":[{"pin":"pin0","state":"off"},{"pin":"pin1","state":"off"}],"status":"successful"}
-  String res = "{}";
-  while (client.available() || client.connected()) {
-    res = client.readStringUntil('\r');
-    Serial.println("->" + res);
-  }
-  Serial.println("-> Response Data: " + res);
+void parseResponseData(String res) {
+  // Example Response Data: {"data":[{"pin":"pin0","state":"off"},{"pin":"pin1","state":"off"}],"status":"successful"}  
   StaticJsonBuffer<500> jsonBuffer;
-  JsonObject& root = jsonBuffer.parseObject(res);
+  JsonObject &root = jsonBuffer.parseObject(res);
   delay(10);
-  // Test if parsing succeeds.
-  if (!root.success()) {
-    Serial.println("parseObject() failed");
+  // Check if json parsing succeeds.
+  if (!root.success() && root["data"] == NULL) {
+    log("parse response data failed");
     return;
   }
-  JsonArray& data = root["data"].asArray();
+  // Parsing
+  JsonArray &data = root["data"].asArray();
   for (int i = 0; i < data.size(); i++) {
     String pinName = data[i]["pin"];
     String pinState = data[i]["state"];
-    Serial.println("pinName: " + pinName);
-    Serial.println("pinState: " + pinState);
+    log("pinName: " + pinName);
+    log("pinState: " + pinState);
     int pin = D0;
     int state = LOW;
     if (pinName == "pin0") {
@@ -124,4 +114,57 @@ void loop() {
     digitalWrite(pin, state);
     delay(10);
   }
+}
+
+String sendRequest(String host,int port, String route) {
+  String res = "{}";
+  // Use WiFiClient class to create TCP connections
+  WiFiClient client;
+  if (!client.connect(host, port)) {
+    log("cannot connect to host");
+    return res;
+  }
+  // Send the request to the server
+  client.print(String("GET ") + route + " HTTP/1.1\r\n" + "Host: " + host +
+               "\r\n" + "Connection: close\r\n\r\n");
+  delay(10);
+  // Waiting for the server to respond
+  unsigned long timeout = millis();
+  while (client.available() == 0) {
+    if (millis() - timeout > 5000) {
+      log("request client timeout!");
+      client.stop();
+      return res;
+    }
+  }
+  // Read all the lines of the reply from server
+  while (client.available() || client.connected()) {
+    res = client.readStringUntil('\r');
+    log("->" + res);
+  }
+  // return last response line
+  return res;
+}
+
+void log(String logString) {
+  log(logString, false);
+}
+
+void log(String logString, bool isInline) {
+  if (!DEBUG_MODE) {
+    return;
+  }
+  if (isInline != NULL && isInline) {
+    Serial.print(logString);
+  } else {
+    Serial.println(logString);
+  }
+}
+
+void inProcess() {    
+  log(".", true);
+  digitalWrite(D4, 0);  
+  delay(100);
+  digitalWrite(D4, 1);
+  delay(100);
 }
